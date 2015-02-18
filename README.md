@@ -13,17 +13,17 @@ This client uses the EPICS build system. After you have an EPICS environment set
 ## How To Run
 
 The client expects a number of PVs on the network provided by the channel access protocol. These PVs are:
-* $(GROUP):getImage
-* $(GROUP):getWidth, $(GROUP):setWidth
-* $(GROUP):getHeight, $(GROUP):setHeight
-* $(GROUP):getOffsetX, $(GROUP):setOffsetX
-* $(GROUP):getOffsetY, $(GROUP):setOffsetY
-* $(GROUP):getExposure, $(GROUP):setExposure
-* $(GROUP):getTriggerSource, $(GROUP):setTriggerSource
-* $(GROUP):getGain, $(GROUP):setGain
-* $(GROUP):getGainAuto, $(GROUP):setGainAuto
+* `$(DEVICE):getImage`
+* `$(DEVICE):getWidth`, `$(DEVICE):setWidth`
+* `$(DEVICE):getHeight`, `$(DEVICE):setHeight`
+* `$(DEVICE):getOffsetX`, `$(DEVICE):setOffsetX`
+* `$(DEVICE):getOffsetY`, `$(DEVICE):setOffsetY`
+* `$(DEVICE):getExposure`, `$(DEVICE):setExposure`
+* `$(DEVICE):getTriggerSource`, `$(DEVICE):setTriggerSource`
+* `$(DEVICE):getGain`, `$(DEVICE):setGain`
+* `$(DEVICE):getGainAuto`, `$(DEVICE):setGainAuto`
 
-The $(GROUP) must be specified when running the binary as the first command-line argument.
+The `$(DEVICE)` must be specified when running the binary as the first command-line argument.
 
 ## Screenshots
 
