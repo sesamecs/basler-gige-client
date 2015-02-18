@@ -1,6 +1,6 @@
 # Basler GigE Camera EPICS Client
 
-This [EPICS](http://www.aps.anl.gov/epics/) channel access client connects to the EPICS Basler GigE camera [driver](https://github.com/sesamecs/basler-gige-epics).
+This [EPICS](http://www.aps.anl.gov/epics/) channel access client connects to the EPICS Basler GigE camera [driver](https://github.com/sesamecs/basler-gige).
 
 It provides access to the video stream and image settings (e.g. resolution, gain, trigger source, ...) found on the camera.
 
