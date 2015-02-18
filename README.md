@@ -4,12 +4,17 @@ This [EPICS](http://www.aps.anl.gov/epics/) channel access client connects to th
 
 It provides access to the video stream and image settings (e.g. resolution, gain, trigger source, ...) found on the camera.
 
+## Screenshots
+
+![Screenshot 1](https://raw.githubusercontent.com/sesamecs/basler-gige-client/master/screenshots/TL1-HC.png)
+![Screenshot 2](https://raw.githubusercontent.com/sesamecs/basler-gige-client/master/screenshots/VBL-G.png)
+
 ## Libraries
 
-* OpenGL under compatibility mode (to run on the stable computers without the newer OpenGL drivers).
-* [SDL](https://www.libsdl.org/).
-* [AntTweakBar](http://anttweakbar.sourceforge.net/).
-* [EPICS](http://www.aps.anl.gov/epics/).
+* OpenGL under compatibility mode (to run on the stable computers without the newer OpenGL drivers)
+* [SDL](https://www.libsdl.org/)
+* [AntTweakBar](http://anttweakbar.sourceforge.net/)
+* [EPICS CA](http://www.aps.anl.gov/epics/docs/ca.php)
 
 ## Licenses
 
