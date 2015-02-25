@@ -25,6 +25,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
 
 // SDL, OpenGL and AntTweakBar
 #include <SDL.h>
@@ -35,8 +36,14 @@
 #include "cadef.h"
 #include "dbDefs.h"
 
+// Common header
+#include "common.h"
+
 // Colormaps
 #include "colormap.h"
+
+// Image saving
+#include "img_save.h"
 
 // Definitions
 #define SHOW_DEBUG 0
@@ -56,19 +63,16 @@ typedef enum { SOFTWARE, HARDWARE } TriggerSource;
 typedef enum { ENABLED, DISABLED } CameraCaptureState;
 typedef enum { MANUAL, AUTOMATIC } GainControl;
 
-struct Pixel {
-  unsigned char r, g, b;
-};
-
 struct Image {
-  unsigned char original[CAM_MAX_WIDTH * CAM_MAX_HEIGHT]; // grayscale camera output (unprocessed)
-  struct Pixel output[CAM_MAX_WIDTH * CAM_MAX_HEIGHT];    // processed RGB image
+  struct GSPixel  original[CAM_MAX_WIDTH * CAM_MAX_HEIGHT]; // grayscale camera output (unprocessed)
+  struct RGBPixel output[CAM_MAX_WIDTH * CAM_MAX_HEIGHT]; // processed RGB image
   unsigned long xprofile[CAM_MAX_WIDTH];                  // sum of grayscale component across a row
   unsigned long yprofile[CAM_MAX_HEIGHT];                 // sum of grayscale component across a column
   GLuint textureId;                                       // OpenGL texture id
   bool needs_texture_update;                              // flag to signal that the texture needs an update
                                                           // this flag is needed because the update needs to
                                                           // happen in the same thread that created the OpenGL context
+  pthread_rwlock_t lock;                                  // read-write lock to synchronize access
 };
 
 union PVValue { // holder of the pv value
@@ -112,6 +116,7 @@ static int win_height = WIN_HEIGHT;
 static int cam_render_offset_x = 0;
 static int cam_render_offset_y = 0;
 static float scale = 1.0;
+static char* base_path;
 
 // visualization settings
 static struct Colormap colormap;
@@ -120,6 +125,7 @@ static bool show_profiles = false;
 // image buffers
 static struct Image img_pixmap[2];    // double image and texture buffering
 static size_t img_current_buffer = 0;
+static pthread_mutex_t buffer_switch_mutex;
 
 // AntTweakBar
 static TwBar* settings_bar;
@@ -162,7 +168,7 @@ static int from_screen_to_camera_y(int screen_y) {
   return height_pv.value.lng - screen_y;
 }
 
-static void drawXProfile() {
+static void drawXProfile(struct Image* image) {
   int x;
 
   #if SHOW_AREA
@@ -172,7 +178,7 @@ static void drawXProfile() {
   for (x = LEFT_BAR_WIDTH + cam_render_offset_x; x < win_width - cam_render_offset_x; x++) {
     int col = from_screen_to_camera_x(x);
 
-    float val = img_pixmap[img_current_buffer].xprofile[col];
+    float val = image->xprofile[col];
     val /= height_pv.value.lng;
     val *= (win_height - 2 * cam_render_offset_y) * 0.2;
     val /= 256.0;
@@ -190,7 +196,7 @@ static void drawXProfile() {
   for (x = LEFT_BAR_WIDTH + cam_render_offset_x; x < win_width - cam_render_offset_x; x++) {
     int col = from_screen_to_camera_x(x);
 
-    float val = img_pixmap[img_current_buffer].xprofile[col];
+    float val = image->xprofile[col];
     val /= height_pv.value.lng;
     val *= (win_height - 2 * cam_render_offset_y) * 0.2;
     val /= 256.0;
@@ -201,7 +207,7 @@ static void drawXProfile() {
   glEnd();
 }
 
-static void drawYProfile() {
+static void drawYProfile(struct Image* image) {
   int y;
 
   #if SHOW_AREA
@@ -211,7 +217,7 @@ static void drawYProfile() {
   for (y = cam_render_offset_y; y < win_height - cam_render_offset_y; y++) {
     int row = from_screen_to_camera_y(y);
 
-    float val = img_pixmap[img_current_buffer].yprofile[row];
+    float val = image->yprofile[row];
     val /= width_pv.value.lng;
     val *= (win_width - 2 * cam_render_offset_x - LEFT_BAR_WIDTH) * 0.2;
     val /= 256.0;
@@ -229,7 +235,7 @@ static void drawYProfile() {
   for (y = cam_render_offset_y; y < win_height - cam_render_offset_y; y++) {
     int row = from_screen_to_camera_y(y);
 
-    float val = img_pixmap[img_current_buffer].yprofile[row];
+    float val = image->yprofile[row];
     val /= width_pv.value.lng;
     val *= (win_width - 2 * cam_render_offset_x - LEFT_BAR_WIDTH) * 0.2;
     val /= 256.0;
@@ -271,8 +277,11 @@ static void render() {
     cam_render_offset_y = extra_pixels / 2;
   }
 
+  struct Image* current_image = &img_pixmap[img_current_buffer];
+  pthread_rwlock_rdlock(&current_image->lock); // disallow writers to access current_image
+
   // use current texture
-  glBindTexture(GL_TEXTURE_2D, img_pixmap[img_current_buffer].textureId);
+  glBindTexture(GL_TEXTURE_2D, current_image->textureId);
   glBegin(GL_QUADS); // draw textured quad
     glTexCoord2i(0, 1);
     glVertex3f(LEFT_BAR_WIDTH + cam_render_offset_x, cam_render_offset_y, 0);
@@ -288,9 +297,11 @@ static void render() {
   glEnd();
 
   if (show_profiles) {
-    drawXProfile();
-    drawYProfile();
+    drawXProfile(current_image);
+    drawYProfile(current_image);
   }
+
+  pthread_rwlock_unlock(&current_image->lock);
 
   TwDraw();
   SDL_GL_SwapBuffers();
@@ -306,13 +317,23 @@ static void update_textures() {
 }
 
 static void black_screen() {
-  // black out pixmap
+  pthread_mutex_lock(&buffer_switch_mutex);
   size_t img_new_buffer = 1 - img_current_buffer;
-  GLuint tId = img_pixmap[img_new_buffer].textureId;
-  memset(&(img_pixmap[img_new_buffer]), 0, sizeof(img_pixmap[img_new_buffer]));
-  img_pixmap[img_new_buffer].textureId = tId;
-  img_pixmap[img_new_buffer].needs_texture_update = true;
+  pthread_mutex_unlock(&buffer_switch_mutex);
+
+  struct Image* new_image = &img_pixmap[img_new_buffer];
+  pthread_rwlock_wrlock(&new_image->lock);
+  // black out pixmap
+  memset(&new_image->original, 0, sizeof(new_image->original));
+  memset(&new_image->output, 0, sizeof(new_image->output));
+  memset(&new_image->xprofile, 0, sizeof(new_image->xprofile));
+  memset(&new_image->yprofile, 0, sizeof(new_image->yprofile));
+  new_image->needs_texture_update = true;
+  pthread_rwlock_unlock(&new_image->lock);
+
+  pthread_mutex_lock(&buffer_switch_mutex);
   img_current_buffer = img_new_buffer;
+  pthread_mutex_unlock(&buffer_switch_mutex);
 }
 
 static void video_connection_state_callback(struct connection_handler_args args) {
@@ -378,14 +399,18 @@ static void video_stream_callback(struct event_handler_args eha) {
     #endif
 
     unsigned char *pdata = (unsigned char *) eha.dbr;
+
+    pthread_mutex_lock(&buffer_switch_mutex);
     size_t img_new_buffer = 1 - img_current_buffer;
-    int i;
+    pthread_mutex_unlock(&buffer_switch_mutex);
 
-    memset(img_pixmap[img_new_buffer].xprofile, 0, sizeof(img_pixmap[img_new_buffer].xprofile));
-    memset(img_pixmap[img_new_buffer].yprofile, 0, sizeof(img_pixmap[img_new_buffer].yprofile));
+    struct Image* new_image = &img_pixmap[img_new_buffer];
+    pthread_rwlock_wrlock(&new_image->lock);
 
-    int x = 0, y = 0;
+    memset(&new_image->xprofile, 0, sizeof(new_image->xprofile));
+    memset(&new_image->yprofile, 0, sizeof(new_image->yprofile));
 
+    int i, x = 0, y = 0;
     for (i = 0; i < eha.count && i < width_pv.value.lng * height_pv.value.lng; i++) {
       if (++x == width_pv.value.lng) {
         x = 0;
@@ -393,16 +418,20 @@ static void video_stream_callback(struct event_handler_args eha) {
       }
 
       unsigned char p_value = pdata[i];
-      img_pixmap[img_new_buffer].original[i] = p_value;
-      img_pixmap[img_new_buffer].output[i].r = colormap.red_transform(p_value);   // apply color transformation
-      img_pixmap[img_new_buffer].output[i].g = colormap.green_transform(p_value); // apply color transformation
-      img_pixmap[img_new_buffer].output[i].b = colormap.blue_transform(p_value);  // apply color transformation
+      new_image->original[i].v = p_value;
+      new_image->output[i].r = colormap.red_transform(p_value);   // apply color transformation
+      new_image->output[i].g = colormap.green_transform(p_value); // apply color transformation
+      new_image->output[i].b = colormap.blue_transform(p_value);  // apply color transformation
 
-      img_pixmap[img_new_buffer].xprofile[x] += p_value;
-      img_pixmap[img_new_buffer].yprofile[y] += p_value;
+      new_image->xprofile[x] += p_value;
+      new_image->yprofile[y] += p_value;
     }
-    img_pixmap[img_new_buffer].needs_texture_update = true; // mark for update on next render
+    new_image->needs_texture_update = true; // mark for update on next render
+    pthread_rwlock_unlock(&new_image->lock);
+
+    pthread_mutex_lock(&buffer_switch_mutex);
     img_current_buffer = img_new_buffer;
+    pthread_mutex_unlock(&buffer_switch_mutex);
   }
 }
 
@@ -482,6 +511,40 @@ static void TW_CALL tw_bar_set_show_profiles_callback(const void *value, void *c
   show_profiles = *(bool*) value;
 }
 
+static void* take_shot_impl(void* uarg) {
+  pthread_mutex_lock(&buffer_switch_mutex);
+  struct Image* current_image = &img_pixmap[img_current_buffer];
+  pthread_mutex_unlock(&buffer_switch_mutex);
+
+  char date[128];
+  time_t now = time(NULL);
+  struct tm* t = localtime(&now);
+
+  strftime(date, sizeof(date) - 1, "%Y-%m-%d_%H:%M:%S", t);
+
+  char* path = (char*) calloc(strlen(base_path) + 1 /* / */ + strlen(group_name) + 1 /* _ */ + strlen(date) + 4 /* .png */ + 1, sizeof(char));
+
+  strcat(path, base_path);
+  if (strlen(base_path) > 0 && base_path[strlen(base_path) - 1] != '/') {
+    strcat(path, "/");
+  }
+  strcat(path, group_name);
+  strcat(path, "_");
+  strcat(path, date);
+  strcat(path, ".png");
+
+  pthread_rwlock_rdlock(&current_image->lock);
+  img_save_color(current_image->output, width_pv.value.lng, height_pv.value.lng, path);
+  pthread_rwlock_unlock(&current_image->lock);
+
+  return NULL;
+}
+
+static void TW_CALL take_shot(void* clientData) {
+  pthread_t thread;
+  pthread_create(&thread, NULL, take_shot_impl, NULL);
+}
+
 static void init_tw_bar() {
   TwInit(TW_OPENGL, NULL);
   TwWindowSize(WIN_WIDTH, WIN_HEIGHT);
@@ -528,6 +591,9 @@ static void init_tw_bar() {
   TwType camera_capture_type = TwDefineEnum("CameraCaptureState", camera_capture_ev, 2);
   TwAddVarCB(settings_bar, "Capturing", camera_capture_type, tw_bar_enable_cam_callback, tw_bar_get_enable_cam_callback, &cam_enable_chid, NULL);
   TwAddVarRO(settings_bar, "FPS", TW_TYPE_FLOAT, &fps, "precision=2");
+
+  TwAddSeparator(settings_bar, "buttons_separator", NULL);
+  TwAddButton(settings_bar, "take_screenshot", take_shot, NULL, "label='Take screenshot'");
 
   char def[2048];
   strcpy(def, group_name);
@@ -714,6 +780,20 @@ static void main_loop() {
   }
 }
 
+static void init_locks() {
+  pthread_mutex_init(&buffer_switch_mutex, NULL);
+  pthread_rwlock_init(&img_pixmap[0].lock, NULL);
+  pthread_rwlock_init(&img_pixmap[1].lock, NULL);
+}
+
+static void init_base_path() {
+  base_path = getenv("CAM_CLIENT_IMG_DIRECTORY"); // take base path from environment
+  if (base_path != NULL) return;
+  base_path = getenv("HOME"); // put base path in home directory
+  if (base_path != NULL) return;
+  base_path = "/tmp/"; // put base path in tmp directory
+}
+
 int main(int argc,char **argv) {
   if (argc != 2) {
     fprintf(stderr, "Usage: %s <group>\n", argv[0]);
@@ -722,6 +802,8 @@ int main(int argc,char **argv) {
 
   group_name = argv[1];
 
+  init_base_path();
+  init_locks();
   init_colormap(HOTCOLD, &colormap);
   init_sdl();
   init_gl();
