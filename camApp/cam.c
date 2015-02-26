@@ -130,6 +130,12 @@ static pthread_mutex_t buffer_switch_mutex;
 // AntTweakBar
 static TwBar* settings_bar;
 
+static void show_message(const char* message) {
+  if (settings_bar) {
+    TwSetParam(settings_bar, "message", "label", TW_PARAM_CSTRING, 1, message);
+  }
+}
+
 // checks whether a connection is establised, possibly waiting max_wait_time_ms
 static bool has_connection(chid channel, int max_wait_time_ms) {
   int wait_time = 0;
@@ -140,6 +146,7 @@ static bool has_connection(chid channel, int max_wait_time_ms) {
   }
 
   if (chst != cs_conn) {
+    show_message("Connection error");
     fprintf(stderr, "connection cannot be established\n");
     return false;
   }
@@ -341,6 +348,7 @@ static void video_connection_state_callback(struct connection_handler_args args)
   pv_connected = (args.op == CA_OP_CONN_UP);
 
   if (!pv_connected) {
+    show_message("Video is disconnected");
     black_screen();
     camera_enabled = DISABLED;
   }
@@ -351,8 +359,7 @@ static void video_connection_state_callback(struct connection_handler_args args)
 
   if (initialized) {
     char window_caption[1024];
-    strcpy(window_caption, group_name);
-    strcat(window_caption, pv_connected ? " (connected)" : " (disconnected)");
+    snprintf(window_caption, sizeof(window_caption), "%s (%s)", group_name, pv_connected ? "connected" : "disconnected");
     SDL_WM_SetCaption(window_caption, NULL);
   }
 }
@@ -369,12 +376,23 @@ static void enable_cam(CameraCaptureState state) {
   if (state == DISABLED) fps = 0.0;
 }
 
+static void TW_CALL enable_cam_tw(void* clientData) {
+  CameraCaptureState state = (CameraCaptureState) clientData; // clientData is the state
+  enable_cam(state);
+}
+
 static void cam_enable_callback(struct event_handler_args eha) {
   // warning: this runs in a different thread
   if (eha.status != ECA_NORMAL) {
     printf("abnormal status: %d\n", eha.status);
+    show_message("Invalid PV state");
   } else {
     camera_enabled = *(int*) eha.dbr == 0 ? ENABLED : DISABLED;
+    if (camera_enabled == ENABLED) {
+      show_message("Capturing started");
+    } else {
+      show_message("Capturing stopped");
+    }
   }
 }
 
@@ -382,6 +400,7 @@ static void video_stream_callback(struct event_handler_args eha) {
   // warning: this runs in a different thread
   if (eha.status != ECA_NORMAL) {
     printf("abnormal status: %d\n", eha.status);
+    show_message("Invalid PV state");
   } else {
     got_frame = true;
 
@@ -439,6 +458,7 @@ static void update_value_callback(struct event_handler_args eha) {
   // warning: this runs in a different thread
   if (eha.status != ECA_NORMAL) {
     printf("abnormal status: %d\n", eha.status);
+    show_message("Invalid PV state");
   } else {
     // set the provided variable to the value of the pv
     *((long *) eha.usr) = *((long *) eha.dbr); // eha.usr is the pointer to the PVValue associated with the PV
@@ -447,19 +467,9 @@ static void update_value_callback(struct event_handler_args eha) {
     if (initialized && (GainControl *)eha.usr == &(gain_control_pv.value.gain_control)) {
       // disable gain field in the tweak bar if the gain control is automatic
       int isReadonly = (gain_control_pv.value.gain_control == AUTOMATIC);
-      TwSetParam(settings_bar, "Gain", "readonly", TW_PARAM_INT32, 1, &isReadonly);
+      TwSetParam(settings_bar, "gain", "readonly", TW_PARAM_INT32, 1, &isReadonly);
     }
   }
-}
-
-static void TW_CALL tw_bar_enable_cam_callback(const void *value, void *clientData) {
-  CameraCaptureState v = *(CameraCaptureState *) value;
-  enable_cam(v);
-}
-
-static void TW_CALL tw_bar_get_enable_cam_callback(void *value, void *clientData) {
-  *(CameraCaptureState *) value = camera_enabled;
-  if (camera_enabled == DISABLED) black_screen();
 }
 
 static void TW_CALL tw_bar_set_value_callback(const void *value, void *clientData) {
@@ -534,9 +544,16 @@ static void* take_shot_impl(void* uarg) {
   strcat(path, ".png");
 
   pthread_rwlock_rdlock(&current_image->lock);
-  img_save_color(current_image->output, width_pv.value.lng, height_pv.value.lng, path);
+  if (img_save_color(current_image->output, width_pv.value.lng, height_pv.value.lng, path)) {
+    char msg[1024];
+    snprintf(msg, sizeof(msg), "Shot saved to '%s'", path);
+    show_message(msg);
+  } else {
+    show_message("Unable to save shot");
+  }
   pthread_rwlock_unlock(&current_image->lock);
 
+  free(path);
   return NULL;
 }
 
@@ -549,59 +566,57 @@ static void init_tw_bar() {
   TwInit(TW_OPENGL, NULL);
   TwWindowSize(WIN_WIDTH, WIN_HEIGHT);
 
-  settings_bar = TwNewBar(group_name);
+  settings_bar = TwNewBar("main_bar");
 
   // Sizing group
-  TwAddVarCB(settings_bar, "Width", TW_TYPE_UINT32, tw_bar_set_value_callback, tw_bar_get_value_callback, &width_pv, "min=320 max=1296 step=100");
-  TwAddVarCB(settings_bar, "Height", TW_TYPE_UINT32, tw_bar_set_value_callback, tw_bar_get_value_callback, &height_pv, "min=240 max=966 step=100");
-  TwAddSeparator(settings_bar, "sizing_separator", NULL);
+  TwAddVarCB(settings_bar, "width", TW_TYPE_UINT32, tw_bar_set_value_callback, tw_bar_get_value_callback, &width_pv, "label=Width min=320 max=1296 step=100 group='Image Resolution'");
+  TwAddVarCB(settings_bar, "height", TW_TYPE_UINT32, tw_bar_set_value_callback, tw_bar_get_value_callback, &height_pv, "label=Height min=240 max=966 step=100 group='Image Resolution'");
 
   // Offset group
-  TwAddVarCB(settings_bar, "Offset X", TW_TYPE_UINT32, tw_bar_set_value_callback, tw_bar_get_value_callback, &offx_pv, "min=0 max=1296 step=100");
-  TwAddVarCB(settings_bar, "Offset Y", TW_TYPE_UINT32, tw_bar_set_value_callback, tw_bar_get_value_callback, &offy_pv, "min=0 max=966 step=100");
-  TwAddSeparator(settings_bar, "offset_separator", NULL);
+  TwAddVarCB(settings_bar, "offset_x", TW_TYPE_UINT32, tw_bar_set_value_callback, tw_bar_get_value_callback, &offx_pv, "label=X min=0 max=1296 step=100 keyincr=RIGHT keydecr=LEFT group='Image Offset'");
+  TwAddVarCB(settings_bar, "offset_y", TW_TYPE_UINT32, tw_bar_set_value_callback, tw_bar_get_value_callback, &offy_pv, "label=Y min=0 max=966 step=100 keyincr=DOWN keydecr=UP group='Image Offset'");
 
   // Camera settings
-  TwAddVarCB(settings_bar, "Exposure", TW_TYPE_UINT32, tw_bar_set_value_callback, tw_bar_get_value_callback, &exposure_pv, "min=16 max=1000000 step=100000");
-  TwAddVarCB(settings_bar, "Gain", TW_TYPE_UINT32, tw_bar_set_value_callback, tw_bar_get_value_callback, &gain_pv, "min=300 max=850 step=50");
+  TwAddVarCB(settings_bar, "exposure", TW_TYPE_UINT32, tw_bar_set_value_callback, tw_bar_get_value_callback, &exposure_pv, "label=Exposure min=16 max=1000000 step=100000 group='Camera Settings'");
+  TwAddVarCB(settings_bar, "gain", TW_TYPE_UINT32, tw_bar_set_value_callback, tw_bar_get_value_callback, &gain_pv, "label=Gain min=300 max=850 step=50 group='Camera Settings'");
 
   TwEnumVal gain_control_ev[] = {{MANUAL, "Manual"}, {AUTOMATIC, "Automatic"}};
   TwType gain_control_type = TwDefineEnum("GainControlType", gain_control_ev, 2);
-  TwAddVarCB(settings_bar, "Gain Control", gain_control_type, tw_bar_set_value_callback, tw_bar_get_value_callback, &gain_control_pv, NULL);
+  TwAddVarCB(settings_bar, "gain_control", gain_control_type, tw_bar_set_value_callback, tw_bar_get_value_callback, &gain_control_pv, "label='Gain Control' group='Camera Settings'");
 
   TwEnumVal trigger_source_ev[] = {{SOFTWARE, "Software"}, {HARDWARE, "Hardware"}};
   TwType trigger_source_type = TwDefineEnum("TriggerSourceType", trigger_source_ev, 2);
-  TwAddVarCB(settings_bar, "Trigger Source", trigger_source_type, tw_bar_set_value_callback, tw_bar_get_value_callback, &trigger_pv, NULL);
-  TwAddSeparator(settings_bar, "settings_separator", NULL);
+  TwAddVarCB(settings_bar, "trigger_source", trigger_source_type, tw_bar_set_value_callback, tw_bar_get_value_callback, &trigger_pv, "label='Trigger Source' group='Camera Settings'");
 
-  // Position
-  TwAddVarCB(settings_bar, "Mouse X", TW_TYPE_INT32, NULL, tw_bar_get_mouse_x, NULL, NULL);
-  TwAddVarCB(settings_bar, "Mouse Y", TW_TYPE_INT32, NULL, tw_bar_get_mouse_y, NULL, NULL);
-  TwAddSeparator(settings_bar, "position_separator", NULL);
+  // Mouse Position
+  TwAddVarCB(settings_bar, "mouse_x", TW_TYPE_INT32, NULL, tw_bar_get_mouse_x, NULL, "label=X group='Mouse Position in Image'");
+  TwAddVarCB(settings_bar, "mouse_y", TW_TYPE_INT32, NULL, tw_bar_get_mouse_y, NULL, "label=Y group='Mouse Position in Image'");
 
-  // Visualization settings
+  // Interface settings
   TwEnumVal colormap_ev[] = {{GRAYSCALE, "Grayscale"}, {HOTCOLD, "Hot-cold"}};
   TwType colormap_type = TwDefineEnum("ColormapType", colormap_ev, 2);
-  TwAddVarCB(settings_bar, "Colormap", colormap_type, tw_bar_set_colormap_callback, tw_bar_get_colormap_callback, NULL, NULL);
-  TwAddVarCB(settings_bar, "Show Profiles", TW_TYPE_BOOL8, tw_bar_set_show_profiles_callback, tw_bar_get_show_profiles_callback, NULL, NULL);
-  TwAddSeparator(settings_bar, "visualization_separator", NULL);
+  TwAddVarCB(settings_bar, "colormap", colormap_type, tw_bar_set_colormap_callback, tw_bar_get_colormap_callback, NULL, "label=Colormap group=Interface");
+  TwAddVarCB(settings_bar, "show_profiles", TW_TYPE_BOOL8, tw_bar_set_show_profiles_callback, tw_bar_get_show_profiles_callback, NULL, "label='Show Profiles' group=Interface");
+
+  // Commands
+  TwAddButton(settings_bar, "start_capture", enable_cam_tw, (void*) ENABLED, "label='Start capture' group=Commands");
+  TwAddButton(settings_bar, "stop_capture", enable_cam_tw, (void*) DISABLED, "label='Stop capture' group=Commands");
+  TwAddButton(settings_bar, "take_shot", take_shot, NULL, "label='Take shot' key=SPACE group=Commands");
 
   // Status
-  TwEnumVal camera_capture_ev[] = {{ENABLED, "Yes"}, {DISABLED, "No"}};
-  TwType camera_capture_type = TwDefineEnum("CameraCaptureState", camera_capture_ev, 2);
-  TwAddVarCB(settings_bar, "Capturing", camera_capture_type, tw_bar_enable_cam_callback, tw_bar_get_enable_cam_callback, &cam_enable_chid, NULL);
-  TwAddVarRO(settings_bar, "FPS", TW_TYPE_FLOAT, &fps, "precision=2");
+  TwAddVarRO(settings_bar, "connected", TW_TYPE_BOOL8, &pv_connected, "label=Connected true=Yes false=No group=State");
+  TwAddVarRO(settings_bar, "capturing", TW_TYPE_BOOL8, &camera_enabled, "label=Capturing true=No false=Yes group=State");
+  TwAddVarRO(settings_bar, "fps", TW_TYPE_FLOAT, &fps, "label=FPS precision=2 group=State");
 
-  TwAddSeparator(settings_bar, "buttons_separator", NULL);
-  TwAddButton(settings_bar, "take_screenshot", take_shot, NULL, "label='Take screenshot'");
+  // Messages
+  TwAddButton(settings_bar, "message", NULL, NULL, "label=' ' group='Last Message'");
 
   char def[2048];
-  strcpy(def, group_name);
-  strcat(def, " size='200 ");
-  char height_str[8];
-  snprintf(height_str, sizeof(height_str), "%d", WIN_HEIGHT);
-  strcat(def, height_str);
-  strcat(def, "' refresh=0.5 color=`0 0 0` position=`0 0` movable=false resizable=false iconifiable=false fontresizable=false");
+  snprintf(def, sizeof(def),
+    "main_bar label='%s' size='200 %d' refresh=0.5 color=`0 0 0` position=`0 0` movable=false resizable=false iconifiable=false fontresizable=false",
+    group_name,
+    WIN_HEIGHT
+  );
   TwDefine(def);
 }
 
@@ -641,18 +656,14 @@ static void init_sdl() {
   ENFORCE(screen != NULL, "invalid SDL screen");
 
   char window_caption[1024];
-  strcpy(window_caption, group_name);
-  strcat(window_caption, pv_connected ? " (connected)" : " (disconnected)");
+  snprintf(window_caption, sizeof(window_caption), "%s (%s)", group_name, pv_connected ? "connected" : "disconnected");
   SDL_WM_SetCaption(window_caption, NULL);
 }
 
 static void init_pv_collection(const char *property, bool monitor, long default_value, struct PVCollection *collection) {
   // create get pv chid (eg. TL1-DI-CAM1:getWidth)
   char get_pv_name[1024];
-  strcpy(get_pv_name, group_name);
-  strcat(get_pv_name, ":get");
-  strcat(get_pv_name, property);
-
+  snprintf(get_pv_name, sizeof(get_pv_name), "%s:get%s", group_name, property);
   SEVCHK(ca_create_channel(get_pv_name, NULL, NULL, CA_PRIORITY_DEFAULT, &(collection->get_pv)), "ca_create_channel");
   if (monitor) {
     SEVCHK(ca_create_subscription(DBR_LONG, 1, collection->get_pv, DBE_VALUE, update_value_callback, &(collection->value.lng), NULL), "ca_create_subscription");
@@ -660,17 +671,12 @@ static void init_pv_collection(const char *property, bool monitor, long default_
 
   // create set pv chid (eg. TL1-DI-CAM1:setWidth)
   char set_pv_name[1024];
-  strcpy(set_pv_name, group_name);
-  strcat(set_pv_name, ":set");
-  strcat(set_pv_name, property);
+  snprintf(set_pv_name, sizeof(set_pv_name), "%s:set%s", group_name, property);
   SEVCHK(ca_create_channel(set_pv_name, NULL, NULL, CA_PRIORITY_DEFAULT, &(collection->set_pv)), "ca_create_channel");
 
   // create proc pv chid (eg. TL1-DI-CAM1:getWidth.PROC)
   char proc_pv_name[1024];
-  strcpy(proc_pv_name, group_name);
-  strcat(proc_pv_name, ":get");
-  strcat(proc_pv_name, property);
-  strcat(proc_pv_name, ".PROC");
+  snprintf(proc_pv_name, sizeof(proc_pv_name), "%s:get%s.PROC", group_name, property);
   SEVCHK(ca_create_channel(proc_pv_name, NULL, NULL, CA_PRIORITY_DEFAULT, &(collection->process_pv)), "ca_create_channel");
 
   collection->value.lng = default_value;
@@ -681,15 +687,13 @@ static void init_epics() {
 
   // connect and monitor getImage pv with video callback
   char pv_name_vid[1024];
-  strcpy(pv_name_vid, group_name);
-  strcat(pv_name_vid, ":getImage");
+  snprintf(pv_name_vid, sizeof(pv_name_vid), "%s:getImage", group_name);
   SEVCHK(ca_create_channel(pv_name_vid, video_connection_state_callback, NULL, CA_PRIORITY_DEFAULT, &video_chid), "ca_create_channel");
   SEVCHK(ca_create_subscription(DBR_CHAR, CAM_MAX_WIDTH * CAM_MAX_HEIGHT, video_chid, DBE_VALUE, video_stream_callback, NULL, NULL), "ca_create_subscription");
 
   // connect the getImage.DISA pv to enable/disable CAM
   char pv_name_enable[1024];
-  strcpy(pv_name_enable, group_name);
-  strcat(pv_name_enable, ":getImage.DISA");
+  snprintf(pv_name_enable, sizeof(pv_name_enable), "%s:getImage.DISA", group_name);
   SEVCHK(ca_create_channel(pv_name_enable, NULL, NULL, CA_PRIORITY_DEFAULT, &cam_enable_chid), "ca_create_channel");
   SEVCHK(ca_create_subscription(DBR_INT, 1, cam_enable_chid, DBE_VALUE, cam_enable_callback, NULL, NULL), "ca_create_subscription");
 
@@ -769,9 +773,7 @@ static void main_loop() {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
       if (!TwEventSDL(&event, SDL_MAJOR_VERSION, SDL_MINOR_VERSION)) {
-        if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_SPACE) {
-          take_shot(NULL);
-        } else if ((event.type == SDL_QUIT) || (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_q)) {
+        if ((event.type == SDL_QUIT) || (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_q)) {
           stop = true;
           break;
         }
