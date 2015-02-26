@@ -769,7 +769,9 @@ static void main_loop() {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
       if (!TwEventSDL(&event, SDL_MAJOR_VERSION, SDL_MINOR_VERSION)) {
-        if ((event.type == SDL_QUIT) || (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_q)) {
+        if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_SPACE) {
+          take_shot(NULL);
+        } else if ((event.type == SDL_QUIT) || (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_q)) {
           stop = true;
           break;
         }
